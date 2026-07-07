@@ -12,6 +12,7 @@ import smtplib
 import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+import time
 
 st.set_page_config(
     page_title="국내 주식 대시보드",
@@ -83,33 +84,27 @@ def load_corp_codes():
         except Exception:
             pass
 
-    # 2) 원본 전체 파일에서 stock_code로 검색
-    full_path = r"C:\Users\Hansol\Desktop\AI자동화교육관련\corpcode\corpcode.csv"
-    if os.path.exists(full_path):
-        try:
-            df_full = pd.read_csv(full_path, dtype={"corp_code": str, "stock_code": str})
-            stock_map = dict(zip(df_full["stock_code"], df_full["corp_code"]))
-            # STOCKS 딕셔너리의 ticker에서 stock_code 추출 (예: "005930.KS" → "005930")
-            result = {}
-            for name, ticker in STOCKS.items():
-                sc = ticker.replace(".KS", "").replace(".KQ", "")
-                if sc in stock_map:
-                    result[name] = stock_map[sc]
-            return result
-        except Exception:
-            pass
-
     return {}
 
 CORP_CODES = load_corp_codes()
 
 # ── 캐시 함수 ──────────────────────────────────────────────────────────────
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_stock_data(ticker, period):
-    stock = yf.Ticker(ticker)
-    hist = stock.history(period=period)
-    info = stock.info
-    return hist, info
+    for attempt in range(3):
+        try:
+            stock = yf.Ticker(ticker)
+            hist  = stock.history(period=period)
+            try:
+                info = stock.info
+            except Exception:
+                info = {}
+            return hist, info
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2 ** attempt)   # 1s → 2s 재시도
+            else:
+                return pd.DataFrame(), {}  # 3회 실패 시 빈 데이터 반환
 
 @st.cache_data(ttl=600)
 def fetch_dart_disclosures(api_key, corp_code, bgn_de, end_de, pblntf_ty=""):
@@ -300,10 +295,15 @@ st.subheader("📊 종목 현황")
 cols = st.columns(min(len(selected_stocks), 5))
 
 summary_data = []
+load_errors = []
 for i, name in enumerate(selected_stocks):
     ticker = STOCKS[name]
-    hist, info = get_stock_data(ticker, period)
+    try:
+        hist, info = get_stock_data(ticker, period)
+    except Exception:
+        hist, info = pd.DataFrame(), {}
     if hist.empty:
+        load_errors.append(name)
         continue
     current_price = hist["Close"].iloc[-1]
     prev_price = hist["Close"].iloc[-2] if len(hist) > 1 else current_price
@@ -323,6 +323,9 @@ for i, name in enumerate(selected_stocks):
         st.metric(label=name, value=f"{current_price:,.0f}원",
                   delta=f"{arrow} {abs(change_pct):.2f}%")
 
+if load_errors:
+    st.warning(f"⚠️ 데이터 조회 실패 (Yahoo Finance 요청 제한): {', '.join(load_errors)} — 잠시 후 새로고침 해주세요.")
+
 st.markdown("---")
 
 # ── 주가 차트 ──────────────────────────────────────────────────────────────
@@ -331,10 +334,13 @@ tabs = st.tabs(selected_stocks)
 
 for i, name in enumerate(selected_stocks):
     ticker = STOCKS[name]
-    hist, info = get_stock_data(ticker, period)
+    try:
+        hist, info = get_stock_data(ticker, period)
+    except Exception:
+        hist, info = pd.DataFrame(), {}
     if hist.empty:
         with tabs[i]:
-            st.warning(f"{name} 데이터를 불러올 수 없습니다.")
+            st.warning(f"{name} 데이터를 불러올 수 없습니다. 잠시 후 새로고침 해주세요.")
         continue
 
     with tabs[i]:
